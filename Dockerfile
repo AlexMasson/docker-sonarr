@@ -1,13 +1,34 @@
 # syntax=docker/dockerfile:1
 
+# --- Stage 1: Build Sonarr from source ---
+FROM mcr.microsoft.com/dotnet/sdk:6.0-alpine AS builder
+
+ARG SONARR_REPO="https://github.com/AlexMasson/Sonarr.git"
+ARG SONARR_BRANCH="feature/llm-prioritization"
+
+RUN apk add --no-cache git && \
+  git clone --depth 1 --branch "${SONARR_BRANCH}" "${SONARR_REPO}" /src
+
+WORKDIR /src
+
+RUN dotnet publish src/NzbDrone.Console/Sonarr.Console.csproj \
+      -f net6.0 \
+      -c Release \
+      -o /build \
+      -r linux-musl-x64 \
+      --self-contained=false \
+      /p:PublishSingleFile=false \
+      /p:TreatWarningsAsErrors=false && \
+    rm -rf /build/Sonarr.Update
+
+# --- Stage 2: Runtime image (same as upstream linuxserver) ---
 FROM ghcr.io/linuxserver/baseimage-alpine:3.23
 
 # set version label
 ARG BUILD_DATE
 ARG VERSION
-ARG SONARR_VERSION
-LABEL build_version="Linuxserver.io version:- ${VERSION} Build-date:- ${BUILD_DATE}"
-LABEL maintainer="thespad"
+LABEL build_version="Custom LLM-prioritization build:- ${VERSION} Build-date:- ${BUILD_DATE}"
+LABEL maintainer="AlexMasson"
 
 # set environment variables
 ENV XDG_CONFIG_HOME="/config/xdg" \
@@ -22,24 +43,14 @@ RUN \
     icu-libs \
     sqlite-libs \
     xmlstarlet && \
-  echo "**** install sonarr ****" && \
-  mkdir -p /app/sonarr/bin && \
-  if [ -z ${SONARR_VERSION+x} ]; then \
-    SONARR_VERSION=$(curl -sX GET http://services.sonarr.tv/v1/releases \
-    | jq -r "first(.[] | select(.releaseChannel==\"${SONARR_CHANNEL}\") | .version)"); \
-  fi && \
-  curl -o \
-    /tmp/sonarr.tar.gz -L \
-    "https://services.sonarr.tv/v1/update/${SONARR_BRANCH}/download?version=${SONARR_VERSION}&os=linuxmusl&runtime=netcore&arch=x64" && \
-  tar xzf \
-    /tmp/sonarr.tar.gz -C \
-    /app/sonarr/bin --strip-components=1 && \
-  echo -e "UpdateMethod=docker\nBranch=${SONARR_BRANCH}\nPackageVersion=${VERSION:-LocalBuild}\nPackageAuthor=[linuxserver.io](https://linuxserver.io)" > /app/sonarr/package_info && \
-  printf "Linuxserver.io version: ${VERSION}\nBuild-date: ${BUILD_DATE}" > /build_version && \
-  echo "**** cleanup ****" && \
-  rm -rf \
-    /app/sonarr/bin/Sonarr.Update \
-    /tmp/*
+  mkdir -p /app/sonarr/bin
+
+# copy built binaries from builder stage
+COPY --from=builder /build/ /app/sonarr/bin/
+
+RUN \
+  echo -e "UpdateMethod=docker\nBranch=feature/llm-prioritization\nPackageVersion=${VERSION:-LocalBuild}\nPackageAuthor=AlexMasson (fork)" > /app/sonarr/package_info && \
+  printf "Custom build version: ${VERSION}\nBuild-date: ${BUILD_DATE}" > /build_version
 
 # add local files
 COPY root/ /

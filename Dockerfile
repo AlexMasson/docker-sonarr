@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# --- Stage 1: Build Sonarr from source ---
-FROM mcr.microsoft.com/dotnet/sdk:6.0-alpine AS builder
+# --- Stage 1: Build frontend ---
+FROM node:20-alpine AS frontend
 
 ARG SONARR_REPO="https://github.com/AlexMasson/Sonarr.git"
 ARG SONARR_BRANCH="feature/llm-prioritization"
@@ -11,18 +11,35 @@ RUN apk add --no-cache git && \
 
 WORKDIR /src
 
-RUN dotnet publish src/NzbDrone.Console/Sonarr.Console.csproj \
-      -f net6.0 \
-      -c Release \
-      -o /build \
-      -r linux-musl-x64 \
-      --self-contained=false \
-      /p:PublishSingleFile=false \
-      /p:TreatWarningsAsErrors=false && \
-    rm -rf /build/Sonarr.Update
+RUN yarn install --frozen-lockfile && \
+    yarn build
 
-# --- Stage 2: Runtime image (same as upstream linuxserver) ---
-FROM ghcr.io/linuxserver/baseimage-alpine:3.23
+# --- Stage 2: Build backend ---
+FROM mcr.microsoft.com/dotnet/sdk:6.0-alpine AS builder
+
+COPY --from=frontend /src /src
+
+WORKDIR /src/src
+
+# Remove global.json version lock so dotnet uses the available SDK
+RUN rm /src/global.json
+
+# Build like the official Sonarr release: framework-dependent, then add runtime files separately
+RUN dotnet msbuild -restore Sonarr.sln \
+      -p:Configuration=Release \
+      -p:RuntimeIdentifiers=linux-musl-x64 \
+      -t:PublishAllRids \
+      /p:TreatWarningsAsErrors=false && \
+    mkdir /build && \
+    cp -r /src/_output/net6.0/linux-musl-x64/publish/* /build/ && \
+    cp -r /src/_output/UI /build/UI && \
+    # Copy .NET 6 runtime native libs so the binary can run without dotnet in PATH
+    cp /usr/share/dotnet/shared/Microsoft.NETCore.App/6*/libhostfxr.so /build/ && \
+    cp /usr/share/dotnet/shared/Microsoft.NETCore.App/6*/libcoreclr.so /build/ && \
+    cp /usr/share/dotnet/shared/Microsoft.NETCore.App/6*/lib*.so /build/ 2>/dev/null || true
+
+# --- Stage 3: Runtime image (same as upstream linuxserver) ---
+FROM ghcr.io/linuxserver/baseimage-alpine:3.20
 
 # set version label
 ARG BUILD_DATE
@@ -45,7 +62,7 @@ RUN \
     xmlstarlet && \
   mkdir -p /app/sonarr/bin
 
-# copy built binaries from builder stage
+# copy built binaries and UI from builder stage (UI goes inside bin/)
 COPY --from=builder /build/ /app/sonarr/bin/
 
 RUN \
